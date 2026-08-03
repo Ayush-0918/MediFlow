@@ -17,6 +17,7 @@ class ActiveIndentsPage extends ConsumerStatefulWidget {
 class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
   // ---------- Draft handling ----------
   final Map<String, TextEditingController> _draftControllers = {};
+  final Map<String, FocusNode> _draftFocusNodes = {};
   bool _isDraftActionInProgress = false;
 
   // ---------- Empty state navigation ----------
@@ -43,6 +44,9 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
   void dispose() {
     for (var c in _draftControllers.values) {
       c.dispose();
+    }
+    for (var n in _draftFocusNodes.values) {
+      n.dispose();
     }
     for (var c in _analysisControllers.values) {
       c.dispose();
@@ -236,9 +240,25 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
     }
   }
 
-  Future<void> _finalSubmit(String requestId) async {
+  Future<void> _finalSubmit(String requestId, int originalQuantity) async {
     setState(() => _isDraftActionInProgress = true);
     try {
+      // Commit any pending edits before submitting
+      final controller = _draftControllers[requestId];
+      if (controller != null) {
+        final val = controller.text.trim();
+        final qty = int.tryParse(val);
+        if (qty != null && qty > 0) {
+          // User entered valid quantity - persist it
+          await ref
+              .read(firebaseServiceProvider)
+              .updateRequestQuantity(requestId, qty);
+        } else if (val.isNotEmpty) {
+          // Invalid input - revert to stored value
+          controller.text = originalQuantity.toString();
+        }
+      }
+
       await ref
           .read(firebaseServiceProvider)
           .updateRequestStatus(requestId, RequestStatus.pending);
@@ -569,6 +589,7 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
                 if (!_draftControllers.containsKey(draft.id)) {
                   _draftControllers[draft.id] =
                       TextEditingController(text: draft.quantity.toString());
+                  _draftFocusNodes[draft.id] = FocusNode();
                 }
                 final medicineInfo = Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -646,6 +667,7 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
                       height: 40,
                       child: TextField(
                         controller: _draftControllers[draft.id],
+                        focusNode: _draftFocusNodes[draft.id],
                         keyboardType: TextInputType.number,
                         style: const TextStyle(fontSize: 14),
                         decoration: InputDecoration(
@@ -653,9 +675,17 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
                                 const EdgeInsets.symmetric(horizontal: 10),
                             border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(8))),
-                        onSubmitted: (val) {
-                          final qty = int.tryParse(val) ?? draft.quantity;
-                          _updateQuantity(draft.id, qty);
+                        onEditingComplete: () {
+                          final val =
+                              _draftControllers[draft.id]?.text.trim() ?? '';
+                          final qty = int.tryParse(val);
+                          if (qty != null && qty > 0) {
+                            _updateQuantity(draft.id, qty);
+                          } else if (val.isNotEmpty) {
+                            // Revert to stored value on invalid input
+                            _draftControllers[draft.id]?.text =
+                                draft.quantity.toString();
+                          }
                         },
                       ),
                     ),
@@ -676,7 +706,7 @@ class _ActiveIndentsPageState extends ConsumerState<ActiveIndentsPage> {
                     FilledButton.icon(
                       onPressed: _isDraftActionInProgress
                           ? null
-                          : () => _finalSubmit(draft.id),
+                          : () => _finalSubmit(draft.id, draft.quantity),
                       icon: const Icon(Icons.send_rounded, size: 16),
                       label: const Text('Submit to CMS'),
                       style: FilledButton.styleFrom(
